@@ -8,6 +8,7 @@ import java.io.InputStreamReader;
 import java.io.IOException;
 import java.io.Reader;
 import java.net.URL;
+import java.net.URLConnection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.logging.Logger;
@@ -54,6 +55,8 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
     private byte[] dyncapPlayersCryptoIv;
     private BukkitTask wlReloadTask;
     private int dyncapPlayersReloadFailures = 0;
+    private long dyncapWLFileLastModified = 0;
+    private long dyncapWLUrlLastModified = 0;
 
 	public void onEnable() {
         plugin_ = this;
@@ -70,6 +73,9 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
         config.options().copyDefaults(true);
         dynamicPlayerCap = config.getInt("initial-cap", 1000);
         dyncapPlayersFile = config.getString("dyncap-whitelist-file");
+        if (dyncapPlayersFile != null) {
+            dyncapWhiteListEnabled = true;
+        }
         dyncapPlayersReloadSec = config.getInt("dyncap-whitelist-interval");
         dyncapPlayersCryptoAlgorithm = config.getString(
             "dyncap-whitelist-crypto", "AES/CBC/PKCS5Padding");
@@ -183,7 +189,7 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 
     public void ReloadDyncapWhitelist() {
         if (dyncapPlayersFile == null) { return; }
-        if (!ReloadDWLFile() && !ReloadDWLUri()) {
+        if (!ReloadDWLUri() && !ReloadDWLFile()) {
             ReloadDyncapWhitelistFailure();
         } else {
             dyncapPlayersReloadFailures = 0;
@@ -197,10 +203,16 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
             if (!f.exists()) {
                 return false;
             }
+            long lastModified = f.lastModified();
+            if (dyncapWLFileLastModified == lastModified) {
+                return true;
+            }
+            dyncapWLFileLastModified = lastModified;
             br = getDWLReader(new FileReader(f));
             dyncapPlayers = LoadDWLFromReader(br);
             return true;
         } catch (Exception ex) {
+            // TODO: Log failure
         } finally {
             try {
                 if (br != null) { br.close(); }
@@ -223,11 +235,20 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
         }
         BufferedReader br = null;
         try {
-            InputStreamReader isr = new InputStreamReader(url.openStream(), "UTF-8");
+            URLConnection connection = url.openConnection();
+            connection.setUseCaches(true);
+            if (dyncapWLUrlLastModified != 0) {
+                connection.setIfModifiedSince(dyncapWLUrlLastModified);
+            }
+            InputStreamReader isr = new InputStreamReader(
+                connection.getInputStream(), "UTF-8");
+            connection.connect();
             br = getDWLReader(isr);
             dyncapPlayers = LoadDWLFromReader(br);
+            dyncapWLUrlLastModified = connection.getLastModified();
             return true;
         } catch (Exception ex) {
+            // TODO: Log failure
         } finally {
             try {
                 if (br != null) { br.close(); }
