@@ -84,7 +84,10 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 		}
 		try {
 			MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-			byte[] keyBytes = sha256.digest(secret.getBytes("UTF-8"));
+			byte[] shaBytes = sha256.digest(secret.getBytes("UTF-8"));
+			// Limited to 128-bit key length in base JVM
+			byte[] keyBytes = new byte[16];
+			System.arraycopy(shaBytes, 0, keyBytes, 0, 16);
 			return new SecretKeySpec(keyBytes, "AES");
 		} catch (Exception ex) {
 			DynCapPlugin.get().error(generateExceptionReport(ex));
@@ -97,7 +100,11 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 			return null;
 		}
 		try {
-			return new IvParameterSpec(iv.getBytes("UTF-8"));
+			MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+			byte[] shaBytes = sha256.digest(iv.getBytes("UTF-8"));
+			byte[] ivBytes = new byte[16];
+			System.arraycopy(shaBytes, 0, ivBytes, 0, 16);
+			return new IvParameterSpec(ivBytes);
 		} catch (Exception ex) {
 			DynCapPlugin.get().error(generateExceptionReport(ex));
 			throw new Error(ex);
