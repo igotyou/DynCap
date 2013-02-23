@@ -1,6 +1,7 @@
 package com.untamedears.DynCap;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -11,19 +12,17 @@ import java.io.StringWriter;
 import java.net.URL;
 import java.net.URLConnection;
 import java.security.Key;
-import java.security.MessageDigest;
 import java.security.spec.AlgorithmParameterSpec;
 import java.util.HashSet;
 import java.util.logging.Logger;
 import java.util.Set;
-
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.xml.bind.DatatypeConverter;
 
 import org.bukkit.Bukkit;
-import org.bukkit.World;
 import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.event.EventHandler;
@@ -36,15 +35,67 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+// START DEBUG ONLY IMPORTS
+import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+// END DEBUG ONLY IMPORTS
+
 public class DynCapPlugin extends JavaPlugin implements Listener {
 	public static final int kTicksPerSec = 20;
 	public static final int kMaxFailures = 2;
+	// Need to install the "Java Cryptography Extension (JCE)
+	// Unlimited Strength Jurisdiction Policy Files" to support
+	// 256-bit keys, aka. 32 bytes.
+	public static final int kAesKeyLength = 32; // Can be 16 or 32
+	public static final int kAesIVLength = 16;
 
 	public static DynCapPlugin plugin_ = null;
 
 	public static DynCapPlugin get() {
 		return plugin_;
 	}
+
+	// START DEBUG: This section is for debugging only when there is no valid SSL
+	// certificate for the site
+	private static class DefaultTrustManager implements X509TrustManager {
+		@Override
+		public void checkClientTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {}
+		@Override
+		public void checkServerTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {}
+		@Override
+		public X509Certificate[] getAcceptedIssuers() {
+			return null;
+		}
+	}
+	static {
+		HttpsURLConnection.setDefaultHostnameVerifier(new HostnameVerifier() {
+			public boolean verify(String hostname, SSLSession session)
+			{
+				// ip address of the service URL
+				if (hostname.equals("67.205.32.32"))
+					return true;
+				return false;
+			}
+		});
+		SSLContext ctx;
+		try {
+			ctx = SSLContext.getInstance("TLS");
+			ctx.init(new KeyManager[0], new TrustManager[] {new DefaultTrustManager()}, new SecureRandom());
+		} catch (Exception ex) {
+			System.out.println(generateExceptionReport(ex));
+			throw new Error(ex);
+		}
+		SSLContext.setDefault(ctx);
+	}
+	// END DEBUG
 
 	public static String generateExceptionReport(Throwable ex) {
 		StringWriter sw = new StringWriter();
@@ -83,11 +134,13 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 			return null;
 		}
 		try {
-			MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-			byte[] shaBytes = sha256.digest(secret.getBytes("UTF-8"));
-			// Limited to 128-bit key length in base JVM
-			byte[] keyBytes = new byte[16];
-			System.arraycopy(shaBytes, 0, keyBytes, 0, 16);
+			byte[] secretBytes = secret.getBytes("UTF-8");
+			if (secretBytes.length < kAesKeyLength) {
+				throw new Error(String.format(
+					"Encryption secret must be %d bytes", kAesKeyLength));
+			}
+			byte[] keyBytes = new byte[kAesKeyLength];
+			System.arraycopy(secretBytes, 0, keyBytes, 0, kAesKeyLength);
 			return new SecretKeySpec(keyBytes, "AES");
 		} catch (Exception ex) {
 			DynCapPlugin.get().error(generateExceptionReport(ex));
@@ -95,15 +148,18 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 		}
 	}
 
-	public static AlgorithmParameterSpec makeIv(String iv) {
-		if (iv == null) {
+	public static AlgorithmParameterSpec makeIv(byte[] rawBytes) {
+		if (rawBytes == null) {
 			return null;
 		}
 		try {
-			MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-			byte[] shaBytes = sha256.digest(iv.getBytes("UTF-8"));
-			byte[] ivBytes = new byte[16];
-			System.arraycopy(shaBytes, 0, ivBytes, 0, 16);
+			// IVs are always 128-bit in Java
+			if (rawBytes.length < kAesIVLength) {
+				throw new Error(String.format(
+					"Encryption IV must be %d bytes", kAesIVLength));
+			}
+			byte[] ivBytes = new byte[kAesIVLength];
+			System.arraycopy(rawBytes, 0, ivBytes, 0, kAesIVLength);
 			return new IvParameterSpec(ivBytes);
 		} catch (Exception ex) {
 			DynCapPlugin.get().error(generateExceptionReport(ex));
@@ -122,22 +178,21 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 	private Integer dyncapPlayersReloadSec;
 	private String dyncapPlayersCipherAlgorithm;
 	private Key dyncapPlayersCipherSecret;
-	private AlgorithmParameterSpec dyncapPlayersCipherIv;
 	private BukkitTask wlReloadTask;
 	private int dyncapPlayersReloadFailures = 0;
 	private long dyncapWLFileLastModified = 0;
 	private long dyncapWLUrlLastModified = 0;
 
 	public void error(String msg) {
-		log.severe("[DynCap] " + msg);
+		log.severe(msg);
 	}
 
 	public void warn(String msg) {
-		log.warning("[DynCap] " + msg);
+		log.warning(msg);
 	}
 
 	public void info(String msg) {
-		log.info("[DynCap] " + msg);
+		log.info(msg);
 	}
 
 	public void onEnable() {
@@ -164,18 +219,7 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 				"dyncap-whitelist-crypto", "AES/CBC/PKCS5Padding");
 			dyncapPlayersCipherSecret = makeKey(
 				config.getString("dyncap-whitelist-secret"));
-			dyncapPlayersCipherIv = makeIv(config.getString("dyncap-whitelist-iv"));
-			if (null == makeCipher(
-					dyncapPlayersCipherAlgorithm,
-					dyncapPlayersCipherSecret,
-					dyncapPlayersCipherIv)) {
-				info("Encryption disabled");
-				dyncapPlayersCipherAlgorithm = null;
-				dyncapPlayersCipherSecret = null;
-				dyncapPlayersCipherIv = null;
-			} else {
-				info("Encryption enabled");
-			}
+			info("Encryption enabled");
 		}
 
 		scheduleDyncapWhitelistReload();
@@ -303,7 +347,7 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 				return true;
 			}
 			dyncapWLFileLastModified = lastModified;
-			br = getDWLReader(new FileInputStream(f));
+			br = getDWLReader(new FileInputStream(f), null);
 			dyncapPlayers = LoadDWLFromReader(br);
 			return true;
 		} catch (Exception ex) {
@@ -324,11 +368,12 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 		try {
 			url = new URL(playersWLUrl);
 		} catch (Exception ex) {
-			return false;
+			throw new Error(String.format("Invalid URL (%s): %s", playersWLUrl, ex.toString()));
 		}
 		String protocol = url.getProtocol();
-		if (protocol != "http" && protocol != "https" && protocol != "file") {
-			return false;
+		if (!protocol.equals("http") && !protocol.equals("https") &&
+				!protocol.equals("file")) {
+			throw new Error("Invalid protocol: " + protocol);
 		}
 		BufferedReader br = null;
 		try {
@@ -338,31 +383,69 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 				connection.setIfModifiedSince(dyncapWLUrlLastModified);
 			}
 			connection.connect();
-			br = getDWLReader(connection.getInputStream());
+			byte[] rawData = ReadAllStream(connection.getInputStream());
+			byte[] ivBytes = null;
+			String b64_encoded = new String(rawData, "UTF-8");
+			if (b64_encoded.charAt(24) == '!') {
+				String b64_header = b64_encoded.substring(0, 24);
+				ivBytes = DatatypeConverter.parseBase64Binary(b64_header);
+				b64_encoded = b64_encoded.substring(25);
+			}
+			rawData = DatatypeConverter.parseBase64Binary(b64_encoded);
+			br = getDWLReader(new ByteArrayInputStream(rawData), ivBytes);
 			dyncapPlayers = LoadDWLFromReader(br);
 			dyncapWLUrlLastModified = connection.getLastModified();
 			return true;
 		} catch (Exception ex) {
 			error("Exception occurred while loading the DynCap white-list via URI");
 			error(generateExceptionReport(ex));
+			throw new Error(ex);
 		} finally {
 			try {
 				if (br != null) { br.close(); }
 			} catch (IOException ex) {
 			}
 		}
-		return false;
 	}
 
-	private BufferedReader getDWLReader(InputStream in) {
-		if (dyncapPlayersCipherAlgorithm != null) {
-			Cipher cipher = makeCipher(
-				dyncapPlayersCipherAlgorithm,
-				dyncapPlayersCipherSecret,
-				dyncapPlayersCipherIv);
-			in = new CipherInputStream(in, cipher);
-		}
+	private byte[] ReadAllStream(InputStream in) {
 		try {
+			byte[] buffer = new byte[65535];
+			byte[] blob = new byte[0];
+			while (true) {
+				int read = in.read(buffer);
+				if (read <= 0) {
+					break;
+				}
+				byte[] tmpBlob = new byte[blob.length + read];
+				System.arraycopy(blob, 0, tmpBlob, 0, blob.length);
+				System.arraycopy(buffer, 0, tmpBlob, blob.length, read);
+				blob = tmpBlob;
+			}
+			return blob;
+		} catch (IOException ex) {
+			error("Exception occurred while reading the input stream");
+			error(generateExceptionReport(ex));
+			throw new Error(ex);
+		} finally {
+			try {
+				in.close();
+			} catch (IOException ex) {
+			}
+		}
+	}
+
+	private BufferedReader getDWLReader(InputStream in, byte[] ivBytes) {
+		try {
+			if (dyncapPlayersCipherAlgorithm != null && ivBytes != null) {
+				// In the format: AAAAAAAAAAAAAAAAAAAAAA==!
+				// 25 raw bytes for 16 byte IV
+				Cipher cipher = makeCipher(
+					dyncapPlayersCipherAlgorithm,
+					dyncapPlayersCipherSecret,
+					makeIv(ivBytes));
+				in = new CipherInputStream(in, cipher);
+			}
 			return new BufferedReader(new InputStreamReader(in, "UTF-8"));
 		} catch (Exception ex) {
 			error(generateExceptionReport(ex));
@@ -376,6 +459,7 @@ public class DynCapPlugin extends JavaPlugin implements Listener {
 			String line = br.readLine().trim().toLowerCase();
 			if (line.length() <= 0) { continue; }
 			if (line.charAt(0) == '#') { continue; }
+			info(line); //XXX
 			new_players.add(line);
 		}
 		return new_players;
